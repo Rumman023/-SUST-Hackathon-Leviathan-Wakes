@@ -226,7 +226,18 @@ def audit(
         max_tokens=120,
     )
     parsed = _safe_extract_json_object(text or "")
-    return _bool_agree(parsed)
+    verdict = _bool_agree(parsed)
+    if verdict is None:
+        # Diagnostic: tells you in Render logs whether the model returned
+        # an unparseable / ambiguous answer (vs. a clean disagree).
+        # Never raised to the caller; audit remains advisory.
+        logger.warning(
+            "qwen_audit_unparseable text_len=%s text_head=%r parsed=%r",
+            len(text or ""),
+            (text or "")[:80],
+            parsed,
+        )
+    return verdict
 
 
 def maybe_polish_reply(reply: str, language: str = "en") -> str:
