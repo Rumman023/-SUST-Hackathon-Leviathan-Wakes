@@ -116,7 +116,7 @@ The rubric scores **evidence reasoning (35%)**, **safety (20%)**, and **schema c
 - **Fast and cheap.** No network round-trip on the hot path. Measured p95 latency is
   ~30 ms locally, far inside the 5 s full-credit tier (no API keys, no cost, no quota).
 
-An **optional** LLM tone-polish step exists behind `USE_LLM=1` + a key. It only rephrases
+An LLM tone-polish step exists behind `USE_LLM=1` + a key. It only rephrases
 the already-safe `customer_reply`, its output is re-sanitized, and it falls back to the
 rule-based reply on any error — so the service is fully functional with **no** API key.
 
@@ -132,7 +132,7 @@ Returns exactly:
 
 ### `POST /analyze-ticket`
 
-**Request** (only `ticket_id` and `complaint` are required; everything else is optional):
+**Request** (only `ticket_id` and `complaint` are required):
 
 ```json
 {
@@ -381,8 +381,8 @@ these set.
 | Model | Where it runs | Why |
 |-------|---------------|-----|
 | **None (deterministic rule engine)** — default | In-process, CPU only | Core decisions (transaction match, verdict, case type, routing, severity, safety) are fully rule-based for reproducibility, exact schema/enum compliance, guaranteed safety, and sub-second latency at zero cost. **This is the path used during judging unless an LLM is explicitly enabled.** |
-| **Optional: OpenAI `gpt-4o-mini`** (or any model set via `MODEL_NAME`) | Remote API, only if `USE_LLM=1` **and** a key is supplied | Light tone-polish of the already-safe `customer_reply` only. Never makes routing/verdict/safety decisions. Output is re-sanitized and falls back to the rule-based reply on any error or timeout. No key ⇒ this path is skipped entirely. |
-| **Optional: Hugging Face `Qwen/Qwen2.5-7B-Instruct`** (or any model set via `HF_MODEL`) | HF Inference API, only if `HF_TOKEN` is supplied | Runs as a **second-opinion auditor** that returns `{"agree": true|false}` on the rule-engine verdict (`LLM_AUDIT=1`) and/or as a tone-polish provider when `USE_LLM_PROVIDER=qwen`. Never overrides the rule engine: on agreement it adds `llm_audit_agrees` and nudges confidence up; on disagreement it adds `llm_audit_disagrees`, flips `human_review_required` to true, and lowers confidence. Any HF failure, timeout, or non-JSON response falls back silently to the rule-only output. |
+| **OpenAI `gpt-4o-mini`** | Remote API, only if `USE_LLM=1` **and** a key is supplied | Light tone-polish of the already-safe `customer_reply` only. Never makes routing/verdict/safety decisions. Output is re-sanitized and falls back to the rule-based reply on any error or timeout. No key ⇒ this path is skipped entirely. |
+| **Hugging Face `Qwen/Qwen2.5-7B-Instruct`** | HF Inference API, only if `HF_TOKEN` is supplied | Runs as a **second-opinion auditor** that returns `{"agree": true|false}` on the rule-engine verdict (`LLM_AUDIT=1`) and/or as a tone-polish provider when `USE_LLM_PROVIDER=qwen`. Never overrides the rule engine: on agreement it adds `llm_audit_agrees` and nudges confidence up; on disagreement it adds `llm_audit_disagrees`, flips `human_review_required` to true, and lowers confidence. Any HF failure, timeout, or non-JSON response falls back silently to the rule-only output. |
 
 No local model weights are bundled; no GPU is used or required. The Qwen
 path is an enhancement layer — running the service without `HF_TOKEN` or
@@ -395,80 +395,6 @@ The repo ships with a Render Blueprint (`render.yaml`) so the service can be dep
 two clicks. Render injects `$PORT` automatically; the start command binds `0.0.0.0:$PORT`
 and reads the rest of its config from environment variables.
 
-### Path A — Blueprint (recommended)
-
-1. Push the repo to GitHub (Render reads `render.yaml` from the default branch).
-2. On Render: **New +** → **Blueprint Instance** → connect the repo.
-3. Render will detect `render.yaml` and create the `queuestorm-investigator` web service
-   with the build, start, health check, and non-secret env vars already filled in.
-4. In the service's **Environment** tab, paste any secrets you want enabled:
-   - `HF_TOKEN` — enables Qwen auditing/polish.
-   - `OPENAI_API_KEY` — enables OpenAI polish (only if `USE_LLM_PROVIDER=openai` and `USE_LLM=1`).
-   - Leave both blank to run the rule-only engine.
-5. Wait for the first deploy to finish, then verify from your laptop:
-
-```bash
-# Replace with the URL Render shows in the service dashboard
-RENDER_URL="https://queuestorm-investigator.onrender.com"
-
-# 1) Health probe
-curl -s "$RENDER_URL/health"
-
-# 2) End-to-end analyze with one of the public sample cases
-curl -s -X POST "$RENDER_URL/analyze-ticket" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "ticket_id": "TKT-RENDER-01",
-    "complaint": "I sent 5000 taka to a wrong number around 2pm today, please reverse it.",
-    "language": "en",
-    "transaction_history": [{
-      "transaction_id": "TXN-9101",
-      "timestamp": "2026-04-14T14:08:22Z",
-      "type": "transfer",
-      "amount": 5000,
-      "counterparty": "+8801719876543",
-      "status": "completed"
-    }]
-  }'
-```
-
-You should see `"case_type": "wrong_transfer"`, `"evidence_verdict": "consistent"`, and (if
-`HF_TOKEN` is set) `"llm_audit_agrees"` in `reason_codes`.
-
-### Path B — Manual web service
-
-If you'd rather not use the Blueprint, the same values inline:
-
-| Field | Value |
-|-------|-------|
-| Runtime | Python |
-| Build Command | `pip install --no-cache-dir -r requirements.txt` |
-| Start Command | `uvicorn app.main:app --host 0.0.0.0 --port $PORT` |
-| Health Check Path | `/health` |
-| Instance Type | Free (hobby), Starter or higher for production traffic |
-| Region | Singapore (closest to SUST / Bangladesh) or any you prefer |
-
-Then add the env vars from the table in [Environment variables](#environment-variables)
-in the dashboard. **Never paste `HF_TOKEN` or `OPENAI_API_KEY` into a public repo** —
-set them only in Render's Environment tab.
-
-### Verifying the deploy
-
-After Render reports "Live", run this from your laptop (or any host with internet):
-
-```bash
-RENDER_URL="https://queuestorm-investigator.onrender.com"
-
-# Probe
-curl -fsS "$RENDER_URL/health" && echo " <- /health ok"
-
-# Audit-path proof: 10/10 sample cases should produce 200 responses, and if
-# HF_TOKEN is set in Render, every response should carry "llm_audit_agrees".
-python scripts/audit_smoke.py
-```
-
-The `audit_smoke.py` script boots a fresh uvicorn against your samples and counts how
-many of them actually called the Qwen endpoint — a clean PASS proves auditing is live.
 
 ### Troubleshooting
 
@@ -485,18 +411,11 @@ many of them actually called the Qwen endpoint — a clean PASS proves auditing 
 The service is a single stateless FastAPI app, so any platform that can run a Python web
 process or a Docker container works. It must bind `0.0.0.0` and read `$PORT`.
 
-- **Render / Railway / Fly.io** — point at the repo, build with `pip install -r
+- **Render** — point at the repo, build with `pip install -r
   requirements.txt`, start with `uvicorn app.main:app --host 0.0.0.0 --port $PORT`. These
   platforms inject `$PORT` automatically. Or deploy the Dockerfile directly. Set any
   optional env vars (e.g. `USE_LLM`, `OPENAI_API_KEY`) in the platform's environment
   settings — not in the repo.
-- **AWS EC2 (or Poridhi VM)** — install Python 3.11+, `pip install -r requirements.txt`,
-  run uvicorn bound to `0.0.0.0:8000`, and open the port in the security group. For
-  production-style stability run it behind a process manager (e.g. `systemd`) or as the
-  Docker container, optionally with Nginx as a reverse proxy for HTTPS.
-- **Poridhi Labs (API Gateway + Lambda)** — the app can be wrapped with an ASGI-to-Lambda
-  adapter (e.g. Mangum) and fronted by API Gateway; alternatively use the t3.medium MLOps
-  environment as a plain VM per the EC2 notes above.
 - **Docker fallback** — `docker build -t queuestorm-team .` then `docker run -p 8000:8000
   queuestorm-team`. Verify `/health` and `/analyze-ticket` from outside the host before
   submitting.
