@@ -46,6 +46,20 @@ from .utils import detect_language
 logger = logging.getLogger("queuestorm")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
+# --- startup env visibility (booleans only; never log secret values) -------
+# Lets you `grep env_audit_visibility` in Render logs to confirm the
+# container actually sees HF_TOKEN + LLM_AUDIT before any request runs.
+logger.info(
+    "env_audit_visibility HF_TOKEN_set=%s LLM_AUDIT=%s "
+    "USE_LLM=%s USE_LLM_PROVIDER=%s HF_MODEL=%s OPENAI_API_KEY_set=%s",
+    bool(os.getenv("HF_TOKEN")),
+    os.getenv("LLM_AUDIT", "1"),
+    os.getenv("USE_LLM", "0"),
+    os.getenv("USE_LLM_PROVIDER", "openai"),
+    os.getenv("HF_MODEL", "(default)"),
+    bool(os.getenv("OPENAI_API_KEY")),
+)
+
 # Hard ceiling on request body (32 KB is generous for a single complaint +
 # a short transaction snippet, and prevents a hostile client from locking a
 # worker). Tunable via env var.
