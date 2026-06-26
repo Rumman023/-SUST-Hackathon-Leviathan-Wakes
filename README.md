@@ -29,6 +29,7 @@ ambiguous for human review.
 - [curl examples](#curl-examples)
 - [Environment variables](#environment-variables)
 - [MODELS](#models)
+- [Deploy to Render](#deploy-to-render)
 - [Deployment notes](#deployment-notes)
 - [Known limitations](#known-limitations)
 - [Project structure](#project-structure)
@@ -387,6 +388,97 @@ No local model weights are bundled; no GPU is used or required. The Qwen
 path is an enhancement layer — running the service without `HF_TOKEN` or
 `OPENAI_API_KEY` still produces deterministic, schema-correct, safety-
 compliant answers.
+
+## Deploy to Render
+
+The repo ships with a Render Blueprint (`render.yaml`) so the service can be deployed in
+two clicks. Render injects `$PORT` automatically; the start command binds `0.0.0.0:$PORT`
+and reads the rest of its config from environment variables.
+
+### Path A — Blueprint (recommended)
+
+1. Push the repo to GitHub (Render reads `render.yaml` from the default branch).
+2. On Render: **New +** → **Blueprint Instance** → connect the repo.
+3. Render will detect `render.yaml` and create the `queuestorm-investigator` web service
+   with the build, start, health check, and non-secret env vars already filled in.
+4. In the service's **Environment** tab, paste any secrets you want enabled:
+   - `HF_TOKEN` — enables Qwen auditing/polish.
+   - `OPENAI_API_KEY` — enables OpenAI polish (only if `USE_LLM_PROVIDER=openai` and `USE_LLM=1`).
+   - Leave both blank to run the rule-only engine.
+5. Wait for the first deploy to finish, then verify from your laptop:
+
+```bash
+# Replace with the URL Render shows in the service dashboard
+RENDER_URL="https://queuestorm-investigator.onrender.com"
+
+# 1) Health probe
+curl -s "$RENDER_URL/health"
+
+# 2) End-to-end analyze with one of the public sample cases
+curl -s -X POST "$RENDER_URL/analyze-ticket" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ticket_id": "TKT-RENDER-01",
+    "complaint": "I sent 5000 taka to a wrong number around 2pm today, please reverse it.",
+    "language": "en",
+    "transaction_history": [{
+      "transaction_id": "TXN-9101",
+      "timestamp": "2026-04-14T14:08:22Z",
+      "type": "transfer",
+      "amount": 5000,
+      "counterparty": "+8801719876543",
+      "status": "completed"
+    }]
+  }'
+```
+
+You should see `"case_type": "wrong_transfer"`, `"evidence_verdict": "consistent"`, and (if
+`HF_TOKEN` is set) `"llm_audit_agrees"` in `reason_codes`.
+
+### Path B — Manual web service
+
+If you'd rather not use the Blueprint, the same values inline:
+
+| Field | Value |
+|-------|-------|
+| Runtime | Python |
+| Build Command | `pip install --no-cache-dir -r requirements.txt` |
+| Start Command | `uvicorn app.main:app --host 0.0.0.0 --port $PORT` |
+| Health Check Path | `/health` |
+| Instance Type | Free (hobby), Starter or higher for production traffic |
+| Region | Singapore (closest to SUST / Bangladesh) or any you prefer |
+
+Then add the env vars from the table in [Environment variables](#environment-variables)
+in the dashboard. **Never paste `HF_TOKEN` or `OPENAI_API_KEY` into a public repo** —
+set them only in Render's Environment tab.
+
+### Verifying the deploy
+
+After Render reports "Live", run this from your laptop (or any host with internet):
+
+```bash
+RENDER_URL="https://queuestorm-investigator.onrender.com"
+
+# Probe
+curl -fsS "$RENDER_URL/health" && echo " <- /health ok"
+
+# Audit-path proof: 10/10 sample cases should produce 200 responses, and if
+# HF_TOKEN is set in Render, every response should carry "llm_audit_agrees".
+python scripts/audit_smoke.py
+```
+
+The `audit_smoke.py` script boots a fresh uvicorn against your samples and counts how
+many of them actually called the Qwen endpoint — a clean PASS proves auditing is live.
+
+### Troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| `502 Bad Gateway` on first request | Render free instances spin down on idle. The first request after idle re-wakes the container (takes ~30 s). Upgrade to a paid plan for always-on. |
+| `ModuleNotFoundError: dotenv` | Already pinned in `requirements.txt`. If you see this, Render is using a stale cache — trigger **Manual Deploy** → **Clear build cache & deploy**. |
+| `address already in use` in logs | Means `$PORT` was not honoured. The `startCommand` in `render.yaml` includes `--port $PORT`; if you set a custom command, keep that flag. |
+| `hf_inference_failed` warnings in logs | Network call to Hugging Face timed out or errored. Rule engine still returns the right verdict — auditing is strictly advisory. |
+| Want OpenAI polish instead of Qwen polish | In Render env, set `USE_LLM_PROVIDER=openai`, `USE_LLM=1`, and supply `OPENAI_API_KEY`. Leave `LLM_AUDIT=1` + `HF_TOKEN` to keep Qwen auditing on. |
 
 ## Deployment notes
 
