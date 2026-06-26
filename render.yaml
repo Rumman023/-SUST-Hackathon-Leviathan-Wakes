@@ -1,0 +1,63 @@
+# render.yaml — Render Blueprint for QueueStorm Investigator
+# Docs: https://docs.render.com/infrastructure-as-code
+#
+# Two ways to use this:
+#   A) Blueprint: push this file to GitHub, then "New +" → "Blueprint Instance"
+#      on Render and point at the repo. Render creates the service for you.
+#   B) Manual:   ignore this file, go to "New +" → "Web Service", connect the
+#      repo, and use the same build/start/env values inline below.
+#
+# The app is a stateless FastAPI service. Render injects $PORT automatically;
+# we bind 0.0.0.0:$PORT in the start command so the same image runs anywhere.
+
+services:
+  - type: web
+    name: queuestorm-investigator
+    runtime: python
+    plan: free           # change to "starter" or higher for production traffic
+    region: singapore    # closest to SUST / Bangladesh; pick what you prefer
+    branch: main
+
+    # Render's Python runtime: install requirements, then run this command.
+    buildCommand: "pip install --no-cache-dir -r requirements.txt"
+    startCommand: "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+
+    # Liveness probe. /health returns {"status": "ok"} with no side effects.
+    healthCheckPath: /health
+
+    # Public env vars (non-secret). Real secrets (HF_TOKEN) are added in the
+    # Render dashboard or with `render env set` so they never enter git.
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.12
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: PORT
+        value: "8000"            # Render overrides with its own $PORT
+      - key: LOG_LEVEL
+        value: INFO
+      - key: REQUEST_TIMEOUT_S
+        value: "25"
+      - key: REQUEST_MAX_BYTES
+        value: "32768"
+
+      # Optional: Hugging Face Qwen auditor. Render dashboard only — never
+      # commit HF_TOKEN. Set USE_LLM_PROVIDER=openai to route polish through
+      # OpenAI; set it to "qwen" to route through Qwen as well.
+      - key: HF_MODEL
+        value: Qwen/Qwen2.5-7B-Instruct
+      - key: USE_LLM
+        value: "0"
+      - key: USE_LLM_PROVIDER
+        value: openai
+      - key: LLM_AUDIT
+        value: "1"
+      - key: LLM_TIMEOUT
+        value: "6"
+
+      # OPTIONAL secret — paste your real key in the Render dashboard. The
+      # blueprint above intentionally leaves it blank.
+      - key: HF_TOKEN
+        sync: false             # must be set manually in Render's Environment
+      - key: OPENAI_API_KEY
+        sync: false             # must be set manually in Render's Environment
